@@ -414,15 +414,19 @@ func (m Model) donateFormBody(w, h int) []string {
 	if f.focus == 0 {
 		outCol = lerpColor(cBorder, cPink, m.glow)
 	}
-	lines = append(lines, inputBoxLines("output dir", f.output.View(), bw, outCol, f.focus == 0)...)
+	for _, l := range inputBoxLines("output dir", f.output.View(), bw, outCol, f.focus == 0) {
+		lines = append(lines, inset+l)
+	}
 	lines = append(lines, blank)
 	appCol := cBorder
 	if f.focus == 1 {
 		appCol = lerpColor(cBorder, cPink, m.glow)
 	}
-	lines = append(lines, inputBoxLines("appid filter", f.appids.View(), bw, appCol, f.focus == 1)...)
+	for _, l := range inputBoxLines("appid filter", f.appids.View(), bw, appCol, f.focus == 1) {
+		lines = append(lines, inset+l)
+	}
 	lines = append(lines, blank)
-	lines = append(lines, inset+m.donateToggleRow())
+	lines = append(lines, centerLine(m.donateToggleRow(), w))
 	if f.err != "" {
 		style := stGreen
 		if strings.HasPrefix(f.err, "✖") {
