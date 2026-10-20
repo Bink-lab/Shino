@@ -94,6 +94,10 @@ func main() {
 }
 
 func runDump(outputDir, appIDsRaw string, remember, upload bool) error {
+	filter, err := dump.ParseAppIDList(appIDsRaw)
+	if err != nil {
+		return err
+	}
 	ctx := context.Background()
 	onStatus := func(line string) { fmt.Println(line) }
 	client, err := dump.ConnectStored(ctx, onStatus)
@@ -133,7 +137,7 @@ func runDump(outputDir, appIDsRaw string, remember, upload bool) error {
 	defer client.Close()
 	summary, err := dump.RunWithClient(ctx, client, dump.Options{
 		OutputDir: outputDir,
-		Filter:    dump.ParseAppIDList(appIDsRaw),
+		Filter:    filter,
 		OnLog:     onStatus,
 	})
 	if err != nil {
@@ -156,7 +160,7 @@ func uploadSummary(ctx context.Context, summary dump.Summary) error {
 	}
 	apiKey, err := store.Load()
 	if err != nil || apiKey == "" {
-		return fmt.Errorf("no shinoweb api key saved, create one on the site and press k on the shino provider")
+		return fmt.Errorf("no shinoweb api key saved, create one on the site and add it with k on the donation screen")
 	}
 	baseURL := os.Getenv("SHINOWEB_URL")
 	if baseURL == "" {

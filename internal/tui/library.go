@@ -107,7 +107,7 @@ func filterApps(apps []library.App, query string) []library.App {
 	}
 	out := make([]library.App, 0, len(apps))
 	for _, app := range apps {
-		if strings.Contains(strings.ToLower(app.Name), query) {
+		if strings.Contains(app.SearchName(), query) {
 			out = append(out, app)
 			continue
 		}

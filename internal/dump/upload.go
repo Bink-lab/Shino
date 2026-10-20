@@ -10,7 +10,14 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+)
+
+const (
+	maxUploadPartSize = 64 << 20
+	maxUploadParts    = 10_000
+	maxUploadResponse = 1 << 20
 )
 
 var uploadClient = &http.Client{
@@ -28,6 +35,7 @@ type UploadConfig struct {
 	BaseURL  string
 	APIKey   string
 	FilePath string
+	OnStart  func(total int)
 }
 
 type uploadStart struct {
@@ -42,7 +50,7 @@ type uploadPart struct {
 }
 
 func UploadDonation(ctx context.Context, cfg UploadConfig, onPart func(done, total int)) (string, error) {
-	base := fmt.Sprintf("%s/api/donations/uploads", cfg.BaseURL)
+	base := strings.TrimRight(cfg.BaseURL, "/") + "/api/donations/uploads"
 	do := func(req *http.Request) (*http.Response, error) {
 		req.Header.Set("x-api-key", cfg.APIKey)
 		return uploadClient.Do(req)
@@ -64,13 +72,13 @@ func UploadDonation(ctx context.Context, cfg UploadConfig, onPart func(done, tot
 	if err != nil {
 		return "", err
 	}
-	raw, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		resp.Body.Close()
+		return "", fmt.Errorf("upload rejected: unauthorized, check the ShinoWeb api key")
+	}
+	raw, err := readUploadResponse(resp)
 	if err != nil {
 		return "", err
-	}
-	if resp.StatusCode == http.StatusUnauthorized {
-		return "", fmt.Errorf("upload rejected: unauthorized, check the ShinoWeb api key")
 	}
 	if resp.StatusCode != http.StatusCreated {
 		return "", fmt.Errorf("upload start failed: %s", string(raw))
@@ -82,14 +90,23 @@ func UploadDonation(ctx context.Context, cfg UploadConfig, onPart func(done, tot
 	if start.PartSize <= 0 {
 		return "", fmt.Errorf("server returned invalid part size %d", start.PartSize)
 	}
+	if start.PartSize > maxUploadPartSize {
+		return "", fmt.Errorf("server returned part size %d, limit %d", start.PartSize, maxUploadPartSize)
+	}
 	file, err := os.Open(cfg.FilePath)
 	if err != nil {
 		return "", err
 	}
 	defer file.Close()
 	totalParts := int((info.Size() + start.PartSize - 1) / start.PartSize)
+	if totalParts > maxUploadParts {
+		return "", fmt.Errorf("upload needs %d parts, limit %d", totalParts, maxUploadParts)
+	}
+	if cfg.OnStart != nil {
+		cfg.OnStart(totalParts)
+	}
 	parts := make([]uploadPart, 0, totalParts)
-	buffer := make([]byte, start.PartSize)
+	buffer := make([]byte, int(start.PartSize))
 	for partNumber := 1; ; partNumber++ {
 		n, readErr := io.ReadFull(file, buffer)
 		if readErr == io.EOF && n == 0 {
@@ -125,8 +142,7 @@ func UploadDonation(ctx context.Context, cfg UploadConfig, onPart func(done, tot
 	if err != nil {
 		return "", err
 	}
-	completeRaw, err := io.ReadAll(completeResp.Body)
-	completeResp.Body.Close()
+	completeRaw, err := readUploadResponse(completeResp)
 	if err != nil {
 		return "", err
 	}
@@ -134,6 +150,18 @@ func UploadDonation(ctx context.Context, cfg UploadConfig, onPart func(done, tot
 		return "", fmt.Errorf("upload complete failed: %s", string(completeRaw))
 	}
 	return start.ID, nil
+}
+
+func readUploadResponse(resp *http.Response) ([]byte, error) {
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxUploadResponse+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxUploadResponse {
+		return nil, fmt.Errorf("upload response exceeds %d bytes", maxUploadResponse)
+	}
+	return raw, nil
 }
 
 func retryablePartStatus(code int) bool {
@@ -168,8 +196,7 @@ func uploadPartWithRetry(ctx context.Context, do func(*http.Request) (*http.Resp
 			lastErr = err
 			continue
 		}
-		raw, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		raw, err := readUploadResponse(resp)
 		if err != nil {
 			lastErr = err
 			continue

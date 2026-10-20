@@ -11,6 +11,8 @@ import (
 
 	"gitee.com/zhReimu/steam-go/infrastructure/protocol/steamlang"
 	ifclient "gitee.com/zhReimu/steam-go/interface/client"
+
+	"github.com/Bink-lab/Shino/internal/library"
 )
 
 func BuildTag() string {
@@ -43,21 +45,11 @@ func osTypeForGOOS(goos string) steamlang.EOSType {
 }
 
 func machineIDFile() string {
-	if dir, err := os.UserConfigDir(); err == nil && dir != "" {
-		return filepath.Join(dir, "Shino", "machineid")
+	dir, err := library.ConfigDir()
+	if err != nil {
+		return ""
 	}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		if runtime.GOOS == "windows" {
-			return filepath.Join(home, "AppData", "Roaming", "Shino", "machineid")
-		}
-		return filepath.Join(home, ".config", "Shino", "machineid")
-	}
-	if exe, err := os.Executable(); err == nil && exe != "" {
-		if dir := filepath.Dir(exe); dir != "" {
-			return filepath.Join(dir, ".shino", "machineid")
-		}
-	}
-	return ""
+	return filepath.Join(dir, "machineid")
 }
 
 func loadMachineSeed() string {

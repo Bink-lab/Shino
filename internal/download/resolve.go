@@ -13,7 +13,7 @@ func resolveManifest(dir string, depotID uint32, gid uint64) (*depot.DepotManife
 	if dir == "" {
 		return nil, fmt.Errorf("depot %d: no manifests directory", depotID)
 	}
-	path := filepath.Join(dir, manifestFileName(depotID, gid))
+	path := filepath.Join(dir, manifest.FileName(depotID, gid))
 	m, err := manifest.LoadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("depot %d: manifest %d: %w", depotID, gid, err)

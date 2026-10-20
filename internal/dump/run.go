@@ -62,7 +62,11 @@ func attachDLCApps(
 	depots, games := 0, 0
 	for i := range kept {
 		attached := false
-		for _, dlcID := range store[kept[i].id].DLCs {
+		dlcs := store[kept[i].id].DLCs
+		if info := infos[kept[i].id]; info != nil {
+			dlcs = mergeIDs(dlcs, AppDLCs(info.KeyValues))
+		}
+		for _, dlcID := range dlcs {
 			if dlcID == kept[i].id {
 				continue
 			}
@@ -89,6 +93,16 @@ func attachDLCApps(
 		}
 	}
 	return depots, games
+}
+
+func appCandidates(app keptApp, free bool) []ownedDepot {
+	candidates := make([]ownedDepot, 0, len(app.extra)+1)
+	if !free {
+		for _, depot := range AppDepots(app.kv) {
+			candidates = append(candidates, ownedDepot{depot: depot, appID: app.id})
+		}
+	}
+	return append(candidates, app.extra...)
 }
 
 func RunWithClient(ctx context.Context, client *Client, opts Options) (Summary, error) {
@@ -198,14 +212,19 @@ func RunWithClient(ctx context.Context, client *Client, opts Options) (Summary, 
 		}
 	}
 	if unknown > 0 {
-		opts.logf("store lookup missed %d apps, those keep no dlc list", unknown)
+		opts.logf("store lookup missed %d apps, free status unknown", unknown)
 	}
 	if attachedDepots, attachedGames := attachDLCApps(kept, infos, store); attachedDepots > 0 {
 		opts.logf("attached %d dlc depots to %d games", attachedDepots, attachedGames)
 	}
 	file := File{Version: 1, Generator: "shino-dump", SteamID: client.SteamID()}
 	manifests := map[string][]byte{}
-	freeSkipped := len(free)
+	freeSkipped := 0
+	for _, app := range kept {
+		if free[app.id] && len(app.extra) == 0 {
+			freeSkipped++
+		}
+	}
 	var mu sync.Mutex
 	var done atomic.Uint64
 	var skippedNoLicense atomic.Uint64
@@ -220,7 +239,11 @@ func RunWithClient(ctx context.Context, client *Client, opts Options) (Summary, 
 			defer func() {
 				opts.logf("app %d done (%d/%d)", app.id, done.Add(1), len(kept))
 			}()
-			if free[app.id] {
+			candidates := appCandidates(app, free[app.id])
+			if len(candidates) == 0 {
+				if !free[app.id] {
+					opts.logf("app %d: no depots listed", app.id)
+				}
 				return
 			}
 			select {
@@ -234,14 +257,6 @@ func RunWithClient(ctx context.Context, client *Client, opts Options) (Summary, 
 			}
 			entry := AppEntry{ID: app.id, Name: AppName(app.kv), DLCAppIDs: app.dlcIDs}
 			local := map[string][]byte{}
-			candidates := make([]ownedDepot, 0, len(app.extra)+1)
-			for _, depot := range AppDepots(app.kv) {
-				candidates = append(candidates, ownedDepot{depot: depot, appID: app.id})
-			}
-			candidates = append(candidates, app.extra...)
-			if len(candidates) == 0 {
-				opts.logf("app %d: no depots listed", app.id)
-			}
 			seenDepots := map[uint32]bool{}
 			for _, cand := range candidates {
 				if ctx.Err() != nil {
@@ -306,7 +321,7 @@ func RunWithClient(ctx context.Context, client *Client, opts Options) (Summary, 
 						}
 					}
 				}
-				local[ManifestMapKey(cand.depot.ID, gid)] = data
+				local[manifestKey(cand.depot.ID, gid)] = data
 				entry.Depots = append(entry.Depots, cand.depot)
 			}
 			mu.Lock()

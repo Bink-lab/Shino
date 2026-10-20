@@ -33,6 +33,7 @@ const (
 	stageDonateForm
 	stageDonateRun
 	stageDonateDone
+	stageDonateKey
 	stageDonateQR
 )
 
@@ -115,6 +116,7 @@ type Model struct {
 	depotTouched map[uint32]bool
 	depotOS      map[uint32]string
 	osLoading    bool
+	osCancel     context.CancelFunc
 	currentOS    string
 
 	glow   float64
@@ -191,6 +193,7 @@ func New() Model {
 			keyStores: keyStores,
 			savedKeys: make([]string, len(providerNames)),
 		},
+		donate: donateForm{keyInput: newDonateKeyInput()},
 	}
 }
 
@@ -223,6 +226,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.resizeLibraryInputs()
+		m.resizeDonateKeyInput()
 		return m, nil
 	case tea.MouseMsg:
 		return m.mouse(msg)
@@ -263,6 +267,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case donateLogMsg:
 		m.donateLog(msg.line)
+		return m, waitCh(m.donate.ch)
+	case donateUploadStartMsg:
+		if msg.seq == m.donate.uploadSeq {
+			m.donate.uploadTotal = msg.total
+		}
+		return m, waitCh(m.donate.ch)
+	case donateUploadPartMsg:
+		if msg.seq == m.donate.uploadSeq {
+			m.donate.uploadDone = msg.done
+			m.donate.uploadTotal = msg.total
+		}
 		return m, waitCh(m.donate.ch)
 	case donateDoneMsg:
 		m.donateFinished(msg)
@@ -393,6 +408,10 @@ func (m Model) quit() (tea.Model, tea.Cmd) {
 	if m.qr.cancel != nil {
 		m.qr.cancel()
 	}
+	if m.osCancel != nil {
+		m.osCancel()
+		m.osCancel = nil
+	}
 	m.cleanupBundle()
 	return m, tea.Quit
 }
@@ -480,15 +499,39 @@ func (m Model) stageKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case stageDonateDone:
 		switch msg.String() {
-		case "q", "esc":
+		case "q":
 			return m.quit()
+		case "esc":
+			if m.donate.uploading {
+				if m.donate.cancel != nil {
+					m.donate.cancel()
+					m.donate.cancel = nil
+				}
+				m.donate.uploading = false
+				m.donate.uploadDone = 0
+				m.donate.uploadTotal = 0
+				m.donate.uploadLine = "upload cancelled"
+				m.donate.uploadFail = true
+				return m, nil
+			}
+			m.stage = stageSource
+			m.errMsg = ""
+			return m, nil
 		case "enter", " ":
-			return m.enterDonateQR()
+			if !m.donate.uploading {
+				return m.enterDonateQR()
+			}
 		case "u":
 			if m.donate.err == nil && !m.donate.uploading && m.donate.summary.Archive != "" {
 				return m.launchDonateUpload()
 			}
+		case "k":
+			if !m.donate.uploading {
+				return m.openDonateKey(false)
+			}
 		}
+	case stageDonateKey:
+		return m.donateKeyKey(msg)
 	case stageDonateQR:
 		return m.qrKey(msg)
 	}
@@ -624,7 +667,12 @@ func (m Model) advance() (tea.Model, tea.Cmd) {
 			}
 		}
 	}
-	return m, fetchDepotOSCmd(cfg.AppID, cfg.Depots, m.manifestsDir(), m.depotOS)
+	if m.osCancel != nil {
+		m.osCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	m.osCancel = cancel
+	return m, fetchDepotOSCmd(ctx, cfg.AppID, cfg.Depots, m.manifestsDir(), m.depotOS)
 }
 
 func (m Model) manifestsDir() string {
@@ -635,8 +683,9 @@ func (m Model) manifestsDir() string {
 }
 
 func (m Model) startDownload() (tea.Model, tea.Cmd) {
-	if m.osLoading {
-		m.errMsg = "resolving depot os, try again in a moment"
+	outputDir := strings.TrimSpace(m.inputs[inputOutput].Value())
+	if outputDir == "" {
+		m.errMsg = "output folder required"
 		m.errFlash = 10
 		return m, nil
 	}
@@ -646,7 +695,13 @@ func (m Model) startDownload() (tea.Model, tea.Cmd) {
 		m.errFlash = 10
 		return m, nil
 	}
+	if m.osCancel != nil {
+		m.osCancel()
+		m.osCancel = nil
+	}
+	m.osLoading = false
 	filtered := &lua.Config{AppID: m.cfg.AppID, Depots: selected}
+	manifestsDir := m.manifestsDir()
 	m.stage = stageDownload
 	m.started = time.Now()
 	m.displayPct = 0
@@ -659,18 +714,24 @@ func (m Model) startDownload() (tea.Model, tea.Cmd) {
 	m.cancel = cancel
 	ch := make(chan tea.Msg, 256)
 	m.ch = ch
+	send := func(msg tea.Msg) {
+		select {
+		case ch <- msg:
+		case <-ctx.Done():
+		}
+	}
 	go func() {
 		warnings, err := download.DownloadAll(ctx, filtered,
-			m.manifestsDir(),
-			strings.TrimSpace(m.inputs[inputOutput].Value()),
+			manifestsDir,
+			outputDir,
 			16,
 			func(depotID uint32, done, total uint64) {
-				ch <- dlProgressMsg{depotID, done, total}
+				send(dlProgressMsg{depotID, done, total})
 			},
 			func(line string) {
-				ch <- dlLogMsg{line}
+				send(dlLogMsg{line})
 			})
-		ch <- dlFinishedMsg{warnings, err}
+		send(dlFinishedMsg{warnings, err})
 		close(ch)
 	}()
 	return m, waitCh(ch)
@@ -887,9 +948,12 @@ func (m Model) titleRow(l layout) string {
 			glyph = lipgloss.NewStyle().Foreground(gradAt(float64(m.frame) * 0.03)).Background(cTitleBg).Bold(true).Render("✓")
 		}
 	case stageDonateDone:
-		if m.donate.err != nil {
+		switch {
+		case m.donate.uploading:
+			glyph = stTitleGlyph.Render(spinnerFrames[m.frame%len(spinnerFrames)])
+		case m.donate.err != nil:
 			glyph = stRed.Background(cTitleBg).Render("×")
-		} else {
+		default:
 			glyph = lipgloss.NewStyle().Foreground(gradAt(float64(m.frame) * 0.03)).Background(cTitleBg).Bold(true).Render("✓")
 		}
 	}
@@ -944,6 +1008,8 @@ func (m Model) stageLabel() string {
 			return "failed"
 		}
 		return "donated"
+	case stageDonateKey:
+		return "api key"
 	case stageDonateQR:
 		return "qr login"
 	}
@@ -977,7 +1043,9 @@ func (m Model) bodyLines(l layout) []string {
 	case stageDonateRun:
 		lines = m.donateRunBody(w, l.bodyH)
 	case stageDonateDone:
-		lines = m.donateDoneBody(w)
+		lines = m.donateDoneBody(w, l.bodyH)
+	case stageDonateKey:
+		lines = m.donateKeyBody(w)
 	case stageDonateQR:
 		lines = m.donateQRBody(w)
 	}
@@ -1439,8 +1507,30 @@ func (m Model) viewSmall() string {
 			b.WriteString(stRed.Render("× failed: "+m.donate.err.Error()) + "\n")
 		} else {
 			b.WriteString(stGreen.Render("✓ donation ready") + "\n")
+			b.WriteString(donateCoreSummary(m.donate.summary, m.donate.elapsed) + "\n")
+			if m.donate.keySaved {
+				b.WriteString("api key saved\n")
+			} else {
+				b.WriteString(stAmber.Render("no api key\n"))
+			}
+			if m.donate.uploading {
+				b.WriteString(fmt.Sprintf("uploading %d/%d\n", m.donate.uploadDone, m.donate.uploadTotal))
+			} else if m.donate.uploadLine != "" {
+				b.WriteString(m.donate.uploadLine + "\n")
+			}
 		}
-		b.WriteString(stDim.Render("q quits") + "\n")
+		if m.donate.uploading {
+			b.WriteString(stDim.Render("esc cancels, q quits") + "\n")
+		} else {
+			b.WriteString(stDim.Render("u upload, k api key, esc backs, q quits") + "\n")
+		}
+	case stageDonateKey:
+		b.WriteString("shinoweb api key\n")
+		b.WriteString(m.donate.keyInput.View() + "\n")
+		if m.donate.keyErr != "" {
+			b.WriteString(stRed.Render("× "+m.donate.keyErr) + "\n")
+		}
+		b.WriteString(stDim.Render("enter saves, esc backs") + "\n")
 	case stageDonateQR:
 		b.WriteString("qr login\n")
 		b.WriteString(stDim.Render("esc backs, q quits") + "\n")

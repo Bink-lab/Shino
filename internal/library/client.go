@@ -32,8 +32,16 @@ const (
 )
 
 type App struct {
-	AppID uint32
-	Name  string
+	AppID      uint32
+	Name       string
+	searchName string
+}
+
+func (a App) SearchName() string {
+	if a.searchName != "" {
+		return a.searchName
+	}
+	return strings.ToLower(strings.TrimSpace(a.Name))
 }
 
 type ClientConfig struct {
@@ -120,7 +128,11 @@ func (c *Client) FetchApps(ctx context.Context) ([]App, error) {
 	}
 	apps := make([]App, 0, len(payload.Apps))
 	for _, a := range payload.Apps {
-		apps = append(apps, App{AppID: a.AppID, Name: a.Name})
+		apps = append(apps, App{
+			AppID:      a.AppID,
+			Name:       a.Name,
+			searchName: strings.ToLower(strings.TrimSpace(a.Name)),
+		})
 	}
 	return apps, nil
 }
@@ -316,16 +328,6 @@ func parseStoreApp(appID uint32, data []byte) StoreApp {
 	return StoreApp{Free: *entry.Data.IsFree, Known: true, DLCs: dlcs}
 }
 
-func parseFreeStatus(appID uint32, data []byte) (free bool, known bool) {
-	info := parseStoreApp(appID, data)
-	return info.Free, info.Known
-}
-
-func (c *Client) FetchFreeStatus(ctx context.Context, appID uint32) (bool, bool) {
-	info := c.fetchStoreApp(ctx, appID)
-	return info.Free, info.Known
-}
-
 func (c *Client) fetchFreeBody(ctx context.Context, target string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
@@ -341,16 +343,6 @@ func (c *Client) fetchFreeBody(ctx context.Context, target string) ([]byte, erro
 		return nil, fmt.Errorf("store request failed with status %s", resp.Status)
 	}
 	return readLimited(resp.Body, maxAppDetailsBytes)
-}
-
-func (c *Client) FetchFreeMap(ctx context.Context, appIDs []uint32) map[uint32]bool {
-	free := map[uint32]bool{}
-	for id, info := range c.FetchStoreMap(ctx, appIDs) {
-		if info.Known && info.Free {
-			free[id] = true
-		}
-	}
-	return free
 }
 
 func (c *Client) FetchStoreMap(ctx context.Context, appIDs []uint32) map[uint32]StoreApp {

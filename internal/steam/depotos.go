@@ -1,12 +1,8 @@
 package steam
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"time"
 
@@ -14,6 +10,7 @@ import (
 	"gitee.com/zhReimu/steam-go/application/apps"
 	"gitee.com/zhReimu/steam-go/domain/keyvalues"
 
+	"github.com/Bink-lab/Shino/internal/appinfo"
 	"github.com/Bink-lab/Shino/internal/lua"
 )
 
@@ -59,7 +56,7 @@ func fetchDepotOSLists(ctx context.Context, c *steam.CompositeClient, appID uint
 	info := ev.ParsedApps[appID]
 	if info == nil {
 		if u := ev.HTTPURLs[appID]; u != "" {
-			kv, ferr := fetchAppInfoHTTP(tctx, u)
+			kv, ferr := appinfo.FetchHTTP(tctx, nil, u)
 			if ferr != nil {
 				return nil, ferr
 			}
@@ -69,7 +66,7 @@ func fetchDepotOSLists(ctx context.Context, c *steam.CompositeClient, appID uint
 	}
 	kv := info.KeyValues
 	if kv == nil && info.UseHTTP && info.HTTPURL != "" {
-		fetched, ferr := fetchAppInfoHTTP(tctx, info.HTTPURL)
+		fetched, ferr := appinfo.FetchHTTP(tctx, nil, info.HTTPURL)
 		if ferr != nil {
 			return nil, ferr
 		}
@@ -79,35 +76,6 @@ func fetchDepotOSLists(ctx context.Context, c *steam.CompositeClient, appID uint
 		return nil, fmt.Errorf("no appinfo for app %d", appID)
 	}
 	return depotOSFromKV(kv), nil
-}
-
-func fetchAppInfoHTTP(ctx context.Context, url string) (*keyvalues.KeyValues, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("appinfo request failed with status %s", resp.Status)
-	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20+1))
-	if err != nil {
-		return nil, err
-	}
-	gz, err := gzip.NewReader(bytes.NewReader(raw))
-	if err != nil {
-		return nil, err
-	}
-	defer gz.Close()
-	text, err := io.ReadAll(io.LimitReader(gz, 64<<20+1))
-	if err != nil {
-		return nil, err
-	}
-	return keyvalues.ParseText(text)
 }
 
 func depotOSFromKV(kv *keyvalues.KeyValues) map[uint32]string {

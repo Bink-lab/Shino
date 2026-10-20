@@ -1,6 +1,7 @@
 package dump
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -181,8 +182,13 @@ func PublicManifest(d DepotEntry) (uint64, bool) {
 	if gid, ok := parseManifestGID(d.Manifests["public"]); ok {
 		return gid, true
 	}
-	for _, raw := range d.Manifests {
-		if gid, ok := parseManifestGID(raw); ok {
+	keys := make([]string, 0, len(d.Manifests))
+	for branch := range d.Manifests {
+		keys = append(keys, branch)
+	}
+	sort.Strings(keys)
+	for _, branch := range keys {
+		if gid, ok := parseManifestGID(d.Manifests[branch]); ok {
 			return gid, true
 		}
 	}
@@ -197,7 +203,7 @@ func parseManifestGID(raw string) (uint64, bool) {
 	return gid, true
 }
 
-func ParseAppIDList(raw string) []uint32 {
+func ParseAppIDList(raw string) ([]uint32, error) {
 	var out []uint32
 	for _, part := range strings.Split(raw, ",") {
 		part = strings.TrimSpace(part)
@@ -206,9 +212,49 @@ func ParseAppIDList(raw string) []uint32 {
 		}
 		id, err := strconv.ParseUint(part, 10, 32)
 		if err != nil || id == 0 {
-			continue
+			return nil, fmt.Errorf("invalid app id %q", part)
 		}
 		out = append(out, uint32(id))
+	}
+	return out, nil
+}
+
+func AppDLCs(kv *keyvalues.KeyValues) []uint32 {
+	if kv == nil {
+		return nil
+	}
+	extended := appRoot(kv).GetChild("extended")
+	if extended == nil {
+		return nil
+	}
+	raw := strings.TrimSpace(extended.GetString("listofdlc", ""))
+	if raw == "" {
+		return nil
+	}
+	var out []uint32
+	seen := map[uint32]bool{}
+	for _, part := range strings.Split(raw, ",") {
+		id, err := strconv.ParseUint(strings.TrimSpace(part), 10, 32)
+		if err != nil || id == 0 || seen[uint32(id)] {
+			continue
+		}
+		seen[uint32(id)] = true
+		out = append(out, uint32(id))
+	}
+	return out
+}
+
+func mergeIDs(lists ...[]uint32) []uint32 {
+	seen := map[uint32]bool{}
+	var out []uint32
+	for _, list := range lists {
+		for _, id := range list {
+			if id == 0 || seen[id] {
+				continue
+			}
+			seen[id] = true
+			out = append(out, id)
+		}
 	}
 	return out
 }

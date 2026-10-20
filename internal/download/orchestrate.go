@@ -17,7 +17,6 @@ func DownloadAll(ctx context.Context, cfg *lua.Config, manifestsDir, outputDir s
 	var warnings []string
 	succeeded := 0
 	var lastErr error
-	var lastID uint32
 	logf("connecting to steam")
 	sess, err := steam.ConnectAnonymous(ctx)
 	if err != nil {
@@ -47,6 +46,9 @@ func DownloadAll(ctx context.Context, cfg *lua.Config, manifestsDir, outputDir s
 	}
 	logf("using %d cdn hosts", len(hosts))
 	for i, dep := range cfg.Depots {
+		if err := ctx.Err(); err != nil {
+			return warnings, err
+		}
 		logf("depot %d: starting (%d/%d)", dep.ID, i+1, len(cfg.Depots))
 		w, err := DownloadDepot(ctx, sess, hosts, Options{
 			AppID:        cfg.AppID,
@@ -70,13 +72,12 @@ func DownloadAll(ctx context.Context, cfg *lua.Config, manifestsDir, outputDir s
 			logf("warn: %s", skipped)
 			warnings = append(warnings, skipped)
 			lastErr = err
-			lastID = dep.ID
 			continue
 		}
 		succeeded++
 	}
-	if succeeded == 0 && lastErr != nil {
-		return warnings, fmt.Errorf("depot %d: %w", lastID, lastErr)
+	if lastErr != nil {
+		return warnings, fmt.Errorf("%d of %d depots failed: %w", len(cfg.Depots)-succeeded, len(cfg.Depots), lastErr)
 	}
 	logf("all depots complete")
 	return warnings, nil

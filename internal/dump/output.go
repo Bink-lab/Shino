@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/Bink-lab/Shino/internal/manifest"
 )
 
 const (
@@ -37,10 +39,6 @@ func RenderLua(appID uint32, depots []DepotEntry) string {
 		}
 	}
 	return b.String()
-}
-
-func ManifestFileName(depotID uint32, gid uint64) string {
-	return fmt.Sprintf("%d_%d.manifest", depotID, gid)
 }
 
 func LuaFileName(appID uint32) string {
@@ -75,6 +73,7 @@ func WriteOutput(root string, file File, manifests map[string][]byte) ([]Written
 		return nil, err
 	}
 	var written []WrittenApp
+	seenManifests := map[string]bool{}
 	for _, app := range file.Apps {
 		luaText := RenderLua(app.ID, app.Depots)
 		luaPath := filepath.Join(luaDir, LuaFileName(app.ID))
@@ -87,7 +86,10 @@ func WriteOutput(root string, file File, manifests map[string][]byte) ([]Written
 			if !ok {
 				continue
 			}
-			name := ManifestFileName(d.ID, gid)
+			name := manifest.FileName(d.ID, gid)
+			if seenManifests[name] {
+				continue
+			}
 			data := manifests[manifestKey(d.ID, gid)]
 			if len(data) == 0 {
 				continue
@@ -96,6 +98,7 @@ func WriteOutput(root string, file File, manifests map[string][]byte) ([]Written
 			if err := os.WriteFile(dest, data, 0o644); err != nil {
 				return nil, err
 			}
+			seenManifests[name] = true
 			entry.Manifests = append(entry.Manifests, dest)
 		}
 		written = append(written, entry)
@@ -108,10 +111,6 @@ func WriteOutput(root string, file File, manifests map[string][]byte) ([]Written
 
 func manifestKey(depotID uint32, gid uint64) string {
 	return fmt.Sprintf("%d/%d", depotID, gid)
-}
-
-func ManifestMapKey(depotID uint32, gid uint64) string {
-	return manifestKey(depotID, gid)
 }
 
 func writeArchive(root string, depots []byte, apps []WrittenApp) error {
@@ -137,9 +136,15 @@ func writeArchive(root string, depots []byte, apps []WrittenApp) error {
 			return fail(err)
 		}
 	}
+	seenManifests := map[string]bool{}
 	for _, app := range apps {
 		for _, path := range app.Manifests {
-			if err := writeZipFile(w, "manifests/"+filepath.Base(path), path); err != nil {
+			name := "manifests/" + filepath.Base(path)
+			if seenManifests[name] {
+				continue
+			}
+			seenManifests[name] = true
+			if err := writeZipFile(w, name, path); err != nil {
 				return fail(err)
 			}
 		}

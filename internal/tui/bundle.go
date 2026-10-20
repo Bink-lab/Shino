@@ -2,6 +2,7 @@ package tui
 
 import (
 	"archive/zip"
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +10,12 @@ import (
 	"strings"
 
 	"github.com/Bink-lab/Shino/internal/lua"
+)
+
+const (
+	maxBundleLuaBytes           = 16 << 20
+	maxBundleManifestBytes      = 256 << 20
+	maxBundleManifestTotalBytes = 2 << 30
 )
 
 type bundle struct {
@@ -42,13 +49,33 @@ func loadBundle(path string) (*bundle, error) {
 	case len(luaFiles) > 1:
 		return nil, fmt.Errorf("zip contains %d .lua files, expected exactly one", len(luaFiles))
 	}
+	if luaFiles[0].UncompressedSize64 > maxBundleLuaBytes {
+		return nil, fmt.Errorf("%s: lua exceeds %d bytes", luaFiles[0].Name, maxBundleLuaBytes)
+	}
+	var manifestBytes uint64
+	for _, f := range manifestFiles {
+		if f.UncompressedSize64 >= maxBundleManifestBytes {
+			return nil, fmt.Errorf("%s: manifest exceeds %d bytes", f.Name, maxBundleManifestBytes)
+		}
+		manifestBytes += f.UncompressedSize64
+		if manifestBytes > maxBundleManifestTotalBytes {
+			return nil, fmt.Errorf("zip manifests exceed %d bytes", maxBundleManifestTotalBytes)
+		}
+	}
 
 	rc, err := luaFiles[0].Open()
 	if err != nil {
 		return nil, err
 	}
 	defer rc.Close()
-	cfg, err := lua.Parse(rc)
+	luaData, err := io.ReadAll(io.LimitReader(rc, maxBundleLuaBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(luaData) > maxBundleLuaBytes {
+		return nil, fmt.Errorf("%s: lua exceeds %d bytes", luaFiles[0].Name, maxBundleLuaBytes)
+	}
+	cfg, err := lua.Parse(bytes.NewReader(luaData))
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", luaFiles[0].Name, err)
 	}
@@ -57,29 +84,48 @@ func loadBundle(path string) (*bundle, error) {
 	if err != nil {
 		return nil, err
 	}
+	var extracted uint64
 	for _, f := range manifestFiles {
 		dest := filepath.Join(dir, filepath.Base(f.Name))
-		if err := extractZipFile(f, dest); err != nil {
+		n, err := extractZipFile(f, dest)
+		if err != nil {
 			os.RemoveAll(dir)
 			return nil, fmt.Errorf("%s: %w", f.Name, err)
+		}
+		extracted += uint64(n)
+		if extracted > maxBundleManifestTotalBytes {
+			os.RemoveAll(dir)
+			return nil, fmt.Errorf("zip manifests exceed %d bytes", maxBundleManifestTotalBytes)
 		}
 	}
 	return &bundle{cfg: cfg, manifestsDir: dir}, nil
 }
 
-func extractZipFile(f *zip.File, dest string) error {
+func extractZipFile(f *zip.File, dest string) (int64, error) {
 	rc, err := f.Open()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer rc.Close()
 	out, err := os.Create(dest)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if _, err := io.Copy(out, io.LimitReader(rc, 256<<20)); err != nil {
+	n, err := io.Copy(out, io.LimitReader(rc, maxBundleManifestBytes))
+	if err != nil {
 		out.Close()
-		return err
+		return 0, err
 	}
-	return out.Close()
+	if n >= maxBundleManifestBytes {
+		out.Close()
+		return 0, fmt.Errorf("manifest exceeds %d bytes", maxBundleManifestBytes)
+	}
+	if f.UncompressedSize64 > 0 && uint64(n) != f.UncompressedSize64 {
+		out.Close()
+		return 0, fmt.Errorf("manifest size mismatch: got %d, want %d", n, f.UncompressedSize64)
+	}
+	if err := out.Close(); err != nil {
+		return 0, err
+	}
+	return n, nil
 }

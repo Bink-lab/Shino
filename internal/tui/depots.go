@@ -14,7 +14,7 @@ type depotOSLoadedMsg struct {
 	os    map[uint32]string
 }
 
-func fetchDepotOSCmd(appID uint32, depots []lua.Depot, manifestsDir string, cached map[uint32]string) tea.Cmd {
+func fetchDepotOSCmd(ctx context.Context, appID uint32, depots []lua.Depot, manifestsDir string, cached map[uint32]string) tea.Cmd {
 	cp := make([]lua.Depot, len(depots))
 	copy(cp, depots)
 	known := make(map[uint32]string, len(cached))
@@ -22,7 +22,7 @@ func fetchDepotOSCmd(appID uint32, depots []lua.Depot, manifestsDir string, cach
 		known[id] = os
 	}
 	return func() tea.Msg {
-		osMap := download.ResolveDepotOS(context.Background(), appID, cp, manifestsDir, known)
+		osMap := download.ResolveDepotOS(ctx, appID, cp, manifestsDir, known)
 		return depotOSLoadedMsg{appID: appID, os: osMap}
 	}
 }
@@ -72,6 +72,10 @@ func (m *Model) applyDepotOS(osMap map[uint32]string) {
 		if !m.depotTouched[d.ID] {
 			m.depotEnabled[d.ID] = download.MatchesCurrentOS(raw, m.currentOS)
 		}
+	}
+	if m.osCancel != nil {
+		m.osCancel()
+		m.osCancel = nil
 	}
 	m.osLoading = false
 }

@@ -19,14 +19,14 @@ type KeyStore struct {
 }
 
 func NewKeyStore(fileName string) (KeyStore, error) {
-	dir, err := configDir()
+	dir, err := ConfigDir()
 	if err != nil {
 		return KeyStore{}, err
 	}
 	return KeyStore{path: filepath.Join(dir, fileName)}, nil
 }
 
-func configDir() (string, error) {
+func ConfigDir() (string, error) {
 	if dir, err := os.UserConfigDir(); err == nil && dir != "" {
 		return filepath.Join(dir, "Shino"), nil
 	}

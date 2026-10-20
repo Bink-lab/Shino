@@ -96,7 +96,11 @@ func DownloadDepot(ctx context.Context, sess *steam.Session, hosts []string, opt
 			warnings = append(warnings, fmt.Sprintf("skipped symlink %s", name))
 			continue
 		}
-		path := filepath.Join(opt.OutputDir, name)
+		path, ok := outputPath(opt.OutputDir, name)
+		if !ok {
+			warnings = append(warnings, fmt.Sprintf("skipped unsafe path %s", name))
+			continue
+		}
 		if len(f.GetChunks()) == 0 {
 			if f.GetSize() == 0 {
 				os.MkdirAll(path, 0o755)
@@ -146,12 +150,19 @@ func DownloadDepot(ctx context.Context, sess *steam.Session, hosts []string, opt
 		if err := os.MkdirAll(filepath.Dir(j.path), 0o755); err != nil {
 			return warnings, err
 		}
-		fh, err := os.OpenFile(j.path, os.O_CREATE|os.O_RDWR, 0o644)
+		fh, err := os.CreateTemp(filepath.Dir(j.path), ".shino-part-*")
 		if err != nil {
+			return warnings, err
+		}
+		partPath := fh.Name()
+		if err := fh.Chmod(0o644); err != nil {
+			fh.Close()
+			os.Remove(partPath)
 			return warnings, err
 		}
 		if err := fh.Truncate(int64(j.mapping.GetSize())); err != nil {
 			fh.Close()
+			os.Remove(partPath)
 			return warnings, err
 		}
 		for _, ch := range j.mapping.GetChunks() {
@@ -177,13 +188,43 @@ func DownloadDepot(ctx context.Context, sess *steam.Session, hosts []string, opt
 			}(fh, ch)
 		}
 		wg.Wait()
-		fh.Close()
+		closeErr := fh.Close()
 		if firstErr != nil {
+			os.Remove(partPath)
 			return warnings, firstErr
+		}
+		if err := ctx.Err(); err != nil {
+			os.Remove(partPath)
+			return warnings, err
+		}
+		if closeErr != nil {
+			os.Remove(partPath)
+			return warnings, closeErr
+		}
+		if err := replaceFile(partPath, j.path); err != nil {
+			os.Remove(partPath)
+			return warnings, fmt.Errorf("commit %s: %w", filepath.Base(j.path), err)
 		}
 	}
 	opt.logf("depot %d: complete", opt.Depot.ID)
 	return warnings, nil
+}
+
+func outputPath(root, name string) (string, bool) {
+	if name == "" || !filepath.IsLocal(name) {
+		return "", false
+	}
+	return filepath.Join(root, name), true
+}
+
+func replaceFile(src, dst string) error {
+	if err := os.Rename(src, dst); err == nil {
+		return nil
+	}
+	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return os.Rename(src, dst)
 }
 
 func FormatBytes(n uint64) string {

@@ -16,6 +16,11 @@ func thumbnailLines(data []byte, columns, rows int) []string {
 	if columns <= 0 || rows <= 0 {
 		return nil
 	}
+	const maxDimension = 4096
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || cfg.Width <= 0 || cfg.Height <= 0 || cfg.Width > maxDimension || cfg.Height > maxDimension {
+		return placeholderThumbnail(columns, rows)
+	}
 	img, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
 		return placeholderThumbnail(columns, rows)

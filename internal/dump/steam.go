@@ -3,7 +3,6 @@ package dump
 import (
 	"archive/zip"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -20,13 +19,14 @@ import (
 	"gitee.com/zhReimu/steam-go/application/apps"
 	steamcontent "gitee.com/zhReimu/steam-go/application/content/directory"
 	"gitee.com/zhReimu/steam-go/application/unified"
-	"gitee.com/zhReimu/steam-go/domain/keyvalues"
 	"gitee.com/zhReimu/steam-go/domain/steamid"
 	protocol "gitee.com/zhReimu/steam-go/infrastructure/protocol"
 	steampb "gitee.com/zhReimu/steam-go/infrastructure/protocol/protobuf"
 	steamlang "gitee.com/zhReimu/steam-go/infrastructure/protocol/steamlang"
 
 	"gitee.com/zhReimu/steam-go/application/content/depot"
+
+	"github.com/Bink-lab/Shino/internal/appinfo"
 )
 
 type Client struct {
@@ -484,7 +484,7 @@ func (c *Client) fetchApps(ctx context.Context, reqs []apps.PICSRequest) (map[ui
 		if info == nil || !info.UseHTTP || info.HTTPURL == "" {
 			continue
 		}
-		kv, err := c.fetchAppInfoHTTP(ctx, info.HTTPURL)
+		kv, err := appinfo.FetchHTTP(ctx, c.http, info.HTTPURL)
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err
@@ -495,41 +495,6 @@ func (c *Client) fetchApps(ctx context.Context, reqs []apps.PICSRequest) (map[ui
 		info.KeyValues = kv
 	}
 	return merged, firstErr
-}
-
-func (c *Client) fetchAppInfoHTTP(ctx context.Context, url string) (*keyvalues.KeyValues, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("appinfo request failed with status %s", resp.Status)
-	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(raw)) > 32<<20 {
-		return nil, fmt.Errorf("appinfo exceeds size limit")
-	}
-	gz, err := gzip.NewReader(bytes.NewReader(raw))
-	if err != nil {
-		return nil, err
-	}
-	defer gz.Close()
-	text, err := io.ReadAll(io.LimitReader(gz, 64<<20+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(text)) > 64<<20 {
-		return nil, fmt.Errorf("appinfo exceeds size limit")
-	}
-	return keyvalues.ParseText(text)
 }
 
 func (c *Client) AppAccessTokens(ctx context.Context, appIDs []uint32) map[uint32]uint64 {

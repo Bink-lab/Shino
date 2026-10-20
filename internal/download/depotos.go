@@ -3,7 +3,6 @@ package download
 import (
 	"context"
 	"encoding/hex"
-	"fmt"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -124,7 +123,7 @@ func InferOSFromManifest(manifestsDir string, dep lua.Depot) string {
 	if manifestsDir == "" || !dep.HasManifest {
 		return ""
 	}
-	path := filepath.Join(manifestsDir, manifestFileName(dep.ID, dep.ManifestID))
+	path := filepath.Join(manifestsDir, manifest.FileName(dep.ID, dep.ManifestID))
 	m, err := manifest.LoadFile(path)
 	if err != nil {
 		return ""
@@ -153,10 +152,6 @@ func InferOSFromManifest(manifestsDir string, dep lua.Depot) string {
 		}
 	}
 	return GuessOSFromFilenames(names)
-}
-
-func manifestFileName(depotID uint32, gid uint64) string {
-	return fmt.Sprintf("%d_%d.manifest", depotID, gid)
 }
 
 func ResolveDepotOS(ctx context.Context, appID uint32, depots []lua.Depot, manifestsDir string, known map[uint32]string) map[uint32]string {
@@ -193,7 +188,13 @@ func ResolveDepotOS(ctx context.Context, appID uint32, depots []lua.Depot, manif
 		}
 		cancel()
 	}
+	if ctx.Err() != nil {
+		return out
+	}
 	for _, d := range depots {
+		if ctx.Err() != nil {
+			return out
+		}
 		if _, ok := out[d.ID]; ok {
 			continue
 		}

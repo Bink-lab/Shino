@@ -11,6 +11,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/Bink-lab/Shino/internal/dump"
 	"github.com/Bink-lab/Shino/internal/library"
@@ -26,23 +27,43 @@ type donateDoneMsg struct {
 }
 
 type donateUploadedMsg struct {
+	seq int
 	id  string
 	err error
 }
 
+type donateUploadStartMsg struct {
+	seq   int
+	total int
+}
+
+type donateUploadPartMsg struct {
+	seq   int
+	done  int
+	total int
+}
+
 type donateForm struct {
-	logs       []string
-	status     string
-	summary    dump.Summary
-	err        error
-	cancel     context.CancelFunc
-	ch         chan tea.Msg
-	started    time.Time
-	elapsed    time.Duration
-	qrClient   *dump.Client
-	uploading  bool
-	uploadLine string
-	uploadFail bool
+	logs          []string
+	status        string
+	summary       dump.Summary
+	err           error
+	cancel        context.CancelFunc
+	ch            chan tea.Msg
+	started       time.Time
+	elapsed       time.Duration
+	qrClient      *dump.Client
+	uploading     bool
+	uploadLine    string
+	uploadFail    bool
+	uploadSeq     int
+	uploadDone    int
+	uploadTotal   int
+	keyInput      textinput.Model
+	keySaved      bool
+	keyInvalid    bool
+	keyErr        string
+	pendingUpload bool
 }
 
 type qrPanel struct {
@@ -84,6 +105,19 @@ func newDonateInput() textinput.Model {
 	return ti
 }
 
+func newDonateKeyInput() textinput.Model {
+	ti := textinput.New()
+	ti.Prompt = "❯ "
+	ti.EchoMode = textinput.EchoPassword
+	ti.Placeholder = "shino_..."
+	ti.PromptStyle = stPrompt
+	ti.TextStyle = stText
+	ti.PlaceholderStyle = stPlaceholder
+	ti.Cursor.Style = stPrompt
+	ti.CharLimit = 128
+	return ti
+}
+
 func newDonateFormFields() donateFormFields {
 	output := newDonateInput()
 	output.SetValue("shino-donation")
@@ -119,6 +153,11 @@ func (m Model) launchDonateRun(client *dump.Client, opts dump.Options) (tea.Mode
 	m.donate.uploading = false
 	m.donate.uploadLine = ""
 	m.donate.uploadFail = false
+	m.donate.uploadDone = 0
+	m.donate.uploadTotal = 0
+	m.donate.pendingUpload = false
+	m.donate.keyErr = ""
+	m.donate.keyInvalid = false
 	m.errMsg = ""
 	ctx, cancel := context.WithCancel(context.Background())
 	m.donate.cancel = cancel
@@ -162,27 +201,113 @@ func (m *Model) donateFinished(msg donateDoneMsg) {
 	}
 	m.donate.summary = msg.summary
 	m.donate.err = msg.err
+	m.donate.keySaved = false
+	if _, key, err := loadShinoKey(); err == nil {
+		m.donate.keySaved = key != ""
+	}
+	m.donate.keyInvalid = false
+	m.donate.uploadDone = 0
+	m.donate.uploadTotal = 0
+	m.donate.pendingUpload = false
 	m.stage = stageDonateDone
 }
 
-func (m Model) launchDonateUpload() (tea.Model, tea.Cmd) {
+func loadShinoKey() (library.KeyStore, string, error) {
 	store, err := library.NewKeyStore(library.ShinoKeyFile)
 	if err != nil {
-		store = library.KeyStore{}
+		return library.KeyStore{}, "", err
 	}
-	apiKey, err := store.Load()
-	if err != nil || apiKey == "" {
-		m.donate.uploadLine = "no shinoweb api key saved, create one on the site and press k on the shino provider"
+	key, err := store.Load()
+	if err != nil {
+		return store, "", err
+	}
+	return store, key, nil
+}
+
+func (m *Model) resizeDonateKeyInput() {
+	l := m.layout()
+	m.donate.keyInput.Width = max(8, min(48, l.bodyW-10))
+}
+
+func (m Model) openDonateKey(pending bool) (tea.Model, tea.Cmd) {
+	m.donate.pendingUpload = pending
+	m.donate.keyErr = ""
+	m.donate.keyInput.SetValue("")
+	m.donate.keyInput.Placeholder = "shino_..."
+	m.resizeDonateKeyInput()
+	m.donate.keyInput.Focus()
+	m.stage = stageDonateKey
+	return m, textinput.Blink
+}
+
+func (m Model) donateKeyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "tab":
+		m.donate.keyInput.Blur()
+		m.donate.pendingUpload = false
+		m.donate.keyErr = ""
+		m.stage = stageDonateDone
+		return m, nil
+	case "enter":
+		key := strings.TrimSpace(m.donate.keyInput.Value())
+		if key == "" {
+			m.donate.keyErr = "paste a shinoweb api key"
+			return m, nil
+		}
+		store, _, err := loadShinoKey()
+		if err != nil {
+			m.donate.keyErr = "could not open the key store: " + err.Error()
+			return m, nil
+		}
+		if err := store.Save(key); err != nil {
+			m.donate.keyErr = "could not save the key: " + err.Error()
+			return m, nil
+		}
+		m.donate.keyInput.Blur()
+		m.donate.keySaved = true
+		m.donate.keyInvalid = false
+		m.donate.keyErr = ""
+		pending := m.donate.pendingUpload
+		m.donate.pendingUpload = false
+		m.stage = stageDonateDone
+		if pending {
+			return m.launchDonateUpload()
+		}
+		return m, nil
+	}
+	m.donate.keyErr = ""
+	var cmd tea.Cmd
+	m.donate.keyInput, cmd = m.donate.keyInput.Update(msg)
+	return m, cmd
+}
+
+func (m Model) launchDonateUpload() (tea.Model, tea.Cmd) {
+	_, apiKey, err := loadShinoKey()
+	if err != nil {
+		m.donate.uploadLine = "could not read the shinoweb api key: " + err.Error()
 		m.donate.uploadFail = true
 		return m, nil
+	}
+	if apiKey == "" {
+		return m.openDonateKey(true)
 	}
 	baseURL := os.Getenv("SHINOWEB_URL")
 	if baseURL == "" {
 		baseURL = library.DefaultShinoWebURL
 	}
+	if m.donate.cancel != nil {
+		m.donate.cancel()
+		m.donate.cancel = nil
+	}
+	m.donate.uploadSeq++
+	seq := m.donate.uploadSeq
 	m.donate.uploading = true
 	m.donate.uploadLine = ""
 	m.donate.uploadFail = false
+	m.donate.keySaved = true
+	m.donate.keyInvalid = false
+	m.donate.uploadDone = 0
+	m.donate.uploadTotal = 0
 	m.donateLog("uploading donation")
 	ctx, cancel := context.WithCancel(context.Background())
 	m.donate.cancel = cancel
@@ -192,14 +317,20 @@ func (m Model) launchDonateUpload() (tea.Model, tea.Cmd) {
 	go func() {
 		id, err := dump.UploadDonation(ctx, dump.UploadConfig{
 			BaseURL: baseURL, APIKey: apiKey, FilePath: archive,
+			OnStart: func(total int) {
+				select {
+				case ch <- donateUploadStartMsg{seq: seq, total: total}:
+				case <-ctx.Done():
+				}
+			},
 		}, func(done, total int) {
 			select {
-			case ch <- donateLogMsg{line: fmt.Sprintf("part %d/%d", done, total)}:
+			case ch <- donateUploadPartMsg{seq: seq, done: done, total: total}:
 			case <-ctx.Done():
 			}
 		})
 		select {
-		case ch <- donateUploadedMsg{id: id, err: err}:
+		case ch <- donateUploadedMsg{seq: seq, id: id, err: err}:
 		case <-ctx.Done():
 		}
 		close(ch)
@@ -208,22 +339,38 @@ func (m Model) launchDonateUpload() (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) donateUploaded(msg donateUploadedMsg) {
+	if msg.seq != m.donate.uploadSeq || !m.donate.uploading {
+		return
+	}
 	m.donate.uploading = false
 	if m.donate.cancel != nil {
 		m.donate.cancel()
 		m.donate.cancel = nil
 	}
+	m.donate.uploadDone = 0
+	m.donate.uploadTotal = 0
 	if msg.err != nil {
-		m.donate.uploadLine = "upload failed: " + msg.err.Error()
 		m.donate.uploadFail = true
+		if strings.Contains(strings.ToLower(msg.err.Error()), "unauthorized") {
+			m.donate.keyInvalid = true
+			m.donate.uploadLine = "shinoweb rejected the api key, press k to replace it"
+		} else {
+			m.donate.uploadLine = "upload failed: " + msg.err.Error()
+		}
 	} else {
-		m.donate.uploadLine = "donation " + msg.id + " uploaded"
+		m.donate.uploadLine = "donation " + msg.id + " uploaded, verification runs on the site"
 		m.donate.uploadFail = false
+		m.donate.keyInvalid = false
 	}
 	m.donateLog(m.donate.uploadLine)
 }
 
 func (m Model) enterDonateQR() (tea.Model, tea.Cmd) {
+	if _, err := dump.ParseAppIDList(m.donateFields.appids.Value()); err != nil {
+		m.donateFields.err = "✖ " + err.Error()
+		m.stage = stageDonateForm
+		return m, nil
+	}
 	m.stage = stageDonateQR
 	m.qr = qrPanel{status: "connecting to steam"}
 	m.errMsg = ""
@@ -303,6 +450,12 @@ func (m Model) qrKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) qrDone(msg qrDoneMsg) (tea.Model, tea.Cmd) {
+	if m.stage != stageDonateQR {
+		if msg.client != nil {
+			msg.client.Close()
+		}
+		return m, nil
+	}
 	if m.qr.cancel != nil {
 		m.qr.cancel()
 		m.qr.cancel = nil
@@ -317,9 +470,15 @@ func (m Model) qrDone(msg qrDoneMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.qr.err = ""
+	filter, err := dump.ParseAppIDList(m.donateFields.appids.Value())
+	if err != nil {
+		m.donateFields.err = "✖ " + err.Error()
+		m.stage = stageDonateForm
+		return m, nil
+	}
 	return m.launchDonateRun(msg.client, dump.Options{
 		OutputDir: strings.TrimSpace(m.donateFields.output.Value()),
-		Filter:    dump.ParseAppIDList(m.donateFields.appids.Value()),
+		Filter:    filter,
 	})
 }
 
@@ -355,8 +514,10 @@ func (m Model) donateFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	if f.focus == 0 {
+		f.err = ""
 		f.output, cmd = f.output.Update(msg)
 	} else if f.focus == 1 {
+		f.err = ""
 		f.appids, cmd = f.appids.Update(msg)
 	}
 	return m, cmd
@@ -486,7 +647,40 @@ func (m Model) donateRunBody(w, h int) []string {
 	return lines
 }
 
-func (m Model) donateDoneBody(w int) []string {
+func (m Model) donateKeyBody(w int) []string {
+	blank := strings.Repeat(" ", w)
+	var lines []string
+	lines = append(lines, blank)
+	title := "shinoweb api key"
+	if m.donate.pendingUpload {
+		title = "api key needed to upload"
+	}
+	lines = append(lines, centerLine(renderGradientText(title, float64(m.frame)*0.03), w))
+	lines = append(lines, blank)
+	bw := min(56, w-4)
+	inset := strings.Repeat(" ", max(0, (w-bw)/2))
+	for _, line := range inputBoxLines("api key", m.donate.keyInput.View(), bw, cPink, true) {
+		lines = append(lines, inset+line)
+	}
+	lines = append(lines, blank)
+	lines = append(lines, centerLine(stMuted.Render("paste a key from the shinoweb api page"), w))
+	lines = append(lines, centerLine(stMuted.Render("saved locally in your shino config"), w))
+	lines = append(lines, blank)
+	if m.donate.keyErr != "" {
+		for _, line := range wrapText("× "+m.donate.keyErr, w-8) {
+			lines = append(lines, centerLine(stRed.Render(line), w))
+		}
+		lines = append(lines, blank)
+	}
+	save := "save"
+	if m.donate.pendingUpload {
+		save = "save and upload"
+	}
+	lines = append(lines, helpLine(w, [2]string{"enter", save}, [2]string{"esc", "back"}))
+	return lines
+}
+
+func (m Model) donateDoneBody(w, h int) []string {
 	blank := strings.Repeat(" ", w)
 	var lines []string
 	lines = append(lines, blank)
@@ -510,52 +704,193 @@ func (m Model) donateDoneBody(w int) []string {
 			lines = append(lines, centerLine(stMuted.Render(truncate(l, w-4)), w))
 		}
 	} else {
-		stats := renderDonateSummary(m.donate.summary, m.donate.elapsed)
-		lines = append(lines, centerLine(stMuted.Render(stats), w))
-		if m.donate.uploading {
-			sp := spinnerFrames[m.frame%len(spinnerFrames)]
-			lines = append(lines, centerLine(stPink.Render(sp)+" "+stText.Render(truncate(m.donate.status, w-8)), w))
-		} else if m.donate.uploadLine != "" {
-			style := stGreen
-			if m.donate.uploadFail {
-				style = stRed
+		if h >= 16 {
+			lines = append(lines, donatePanel("donation", donateStatLines(donateStats(m.donate.summary, m.donate.elapsed), w-8), w)...)
+			if m.donate.summary.FailedTransient > 0 {
+				lines = append(lines, centerLine(stAmber.Render(fmt.Sprintf("%d depots failed, rerun to retry", m.donate.summary.FailedTransient)), w))
 			}
-			lines = append(lines, centerLine(style.Render(truncate(m.donate.uploadLine, w-8)), w))
-		} else if m.donate.summary.Archive != "" {
-			lines = append(lines, centerLine(stMuted.Render("u upload "+filepath.Base(m.donate.summary.Archive)), w))
+		} else if h >= 12 {
+			for _, line := range donateStatLines(donateStats(m.donate.summary, m.donate.elapsed), w-4) {
+				lines = append(lines, centerLine(line, w))
+			}
+		} else {
+			lines = append(lines, centerLine(stMuted.Render(truncate(donateCoreSummary(m.donate.summary, m.donate.elapsed), w-2)), w))
 		}
-		lines = append(lines, centerLine(stMuted.Render(m.donate.summary.OutputDir), w))
+		lines = append(lines, blank)
+		lines = append(lines, m.donateKeyStatusLines(w)...)
+		lines = append(lines, m.donateUploadLines(w)...)
+		if h >= 16 {
+			var paths []string
+			if archive := m.donate.summary.Archive; archive != "" {
+				paths = append(paths, stMuted.Render("archive  ")+stText.Render(truncate(filepath.Base(archive), w-12)))
+			}
+			if output := m.donate.summary.OutputDir; output != "" {
+				paths = append(paths, stMuted.Render("folder   ")+stText.Render(tailPath(output, w-12)))
+			}
+			if len(paths) > 0 {
+				lines = append(lines, blank)
+				blockW := 0
+				for _, path := range paths {
+					blockW = max(blockW, lipgloss.Width(path))
+				}
+				for _, path := range paths {
+					lines = append(lines, centerLine(path+strings.Repeat(" ", max(0, blockW-lipgloss.Width(path))), w))
+				}
+			}
+		}
 	}
 	lines = append(lines, blank)
-	help := [][2]string{{"enter", "again"}}
-	if m.donate.err == nil && !m.donate.uploading && m.donate.summary.Archive != "" {
-		help = append(help, [2]string{"u", "upload"})
+	help := [][2]string{}
+	if m.donate.uploading {
+		help = append(help, [2]string{"esc", "cancel"}, [2]string{"q", "quit"})
+	} else if m.donate.err != nil {
+		help = append(help, [2]string{"enter", "retry"}, [2]string{"esc", "back"}, [2]string{"q", "quit"})
+	} else {
+		help = append(help, [2]string{"enter", "again"})
+		if m.donate.summary.Archive != "" {
+			help = append(help, [2]string{"u", "upload"})
+		}
+		help = append(help, [2]string{"k", "api key"}, [2]string{"esc", "back"}, [2]string{"q", "quit"})
 	}
-	help = append(help, [2]string{"esc", "back"}, [2]string{"q", "quit"})
 	lines = append(lines, helpLine(w, help...))
 	return lines
 }
 
-func renderDonateSummary(summary dump.Summary, elapsed time.Duration) string {
-	parts := []string{
-		strconv.Itoa(summary.Apps) + " apps",
-		strconv.Itoa(summary.Depots) + " depots",
-		strconv.Itoa(summary.Manifests) + " manifests",
+type donateStat struct {
+	label string
+	value string
+}
+
+func donateStats(summary dump.Summary, elapsed time.Duration) []donateStat {
+	stats := []donateStat{
+		{label: "apps", value: strconv.Itoa(summary.Apps)},
+		{label: "depots", value: strconv.Itoa(summary.Depots)},
+		{label: "manifests", value: strconv.Itoa(summary.Manifests)},
 	}
 	if summary.Reused > 0 {
-		parts = append(parts, strconv.Itoa(summary.Reused)+" reused")
+		stats = append(stats, donateStat{label: "reused", value: strconv.Itoa(summary.Reused)})
 	}
 	if summary.FreeSkipped > 0 {
-		parts = append(parts, strconv.Itoa(summary.FreeSkipped)+" free skipped")
+		stats = append(stats, donateStat{label: "free skipped", value: strconv.Itoa(summary.FreeSkipped)})
 	}
 	if summary.SkippedNoLicense > 0 {
-		parts = append(parts, strconv.Itoa(summary.SkippedNoLicense)+" no license")
+		stats = append(stats, donateStat{label: "no license", value: strconv.Itoa(summary.SkippedNoLicense)})
 	}
-	if summary.FailedTransient > 0 {
-		parts = append(parts, strconv.Itoa(summary.FailedTransient)+" failed, rerun to retry")
+	stats = append(stats, donateStat{label: "time", value: elapsed.Round(time.Second).String()})
+	return stats
+}
+
+func donateStatLines(stats []donateStat, maxW int) []string {
+	labelW, valueW := 0, 0
+	for _, stat := range stats {
+		labelW = max(labelW, lipgloss.Width(stat.label))
+		valueW = max(valueW, lipgloss.Width(stat.value))
 	}
-	parts = append(parts, elapsed.Round(time.Second).String())
-	return strings.Join(parts, " · ")
+	cell := func(stat donateStat) string {
+		return stMuted.Render(fmt.Sprintf("%-*s", labelW, stat.label)) + "  " +
+			stText.Render(fmt.Sprintf("%-*s", valueW, stat.value))
+	}
+	twoCol := len(stats) > 1 && maxW >= 2*(labelW+2+valueW)+6
+	if !twoCol {
+		lines := make([]string, 0, len(stats))
+		for _, stat := range stats {
+			lines = append(lines, cell(stat))
+		}
+		return lines
+	}
+	lines := make([]string, 0, (len(stats)+1)/2)
+	for i := 0; i < len(stats); i += 2 {
+		line := cell(stats[i])
+		if i+1 < len(stats) {
+			line += "      " + cell(stats[i+1])
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+func donatePanel(title string, body []string, w int) []string {
+	innerW := lipgloss.Width(title) + 2
+	for _, line := range body {
+		innerW = max(innerW, lipgloss.Width(line))
+	}
+	bw := min(max(innerW+4, 30), max(20, w-2))
+	inner := bw - 4
+	top := stBorder.Render("╭ ") + stMuted.Render(title) +
+		stBorder.Render(" "+strings.Repeat("─", max(1, bw-4-lipgloss.Width(title)))+"╮")
+	lines := []string{centerLine(top, w)}
+	for _, line := range body {
+		lines = append(lines, centerLine(stBorder.Render("│")+" "+padLine(line, inner)+" "+stBorder.Render("│"), w))
+	}
+	lines = append(lines, centerLine(stBorder.Render("╰"+strings.Repeat("─", max(1, bw-2))+"╯"), w))
+	return lines
+}
+
+func (m Model) donateKeyStatusLines(w int) []string {
+	text := "! no shinoweb key · press k to add it, new games earn downloads"
+	style := stAmber
+	switch {
+	case m.donate.keyInvalid:
+		text = "× shinoweb key rejected · press k to replace it"
+		style = stRed
+	case m.donate.keySaved:
+		text = "✓ shinoweb key saved · new games earn downloads"
+		style = stGreen
+	}
+	var lines []string
+	for _, line := range wrapText(text, max(8, w-4)) {
+		lines = append(lines, centerLine(style.Render(line), w))
+	}
+	return lines
+}
+
+func (m Model) donateUploadLines(w int) []string {
+	if m.donate.uploading {
+		sp := spinnerFrames[m.frame%len(spinnerFrames)]
+		label := "uploading donation"
+		if m.donate.uploadTotal > 0 {
+			label = fmt.Sprintf("uploading donation · %d/%d parts", m.donate.uploadDone, m.donate.uploadTotal)
+		}
+		lines := []string{centerLine(stPink.Render(sp)+" "+stText.Render(label), w)}
+		if m.donate.uploadTotal > 0 {
+			pct := float64(m.donate.uploadDone) / float64(m.donate.uploadTotal)
+			barW := clampInt(w-24, 12, 40)
+			lines = append(lines, centerLine(renderBar(pct, barW, float64(m.frame)*0.35)+"  "+
+				stMuted.Render(fmt.Sprintf("%3.0f%%", pct*100)), w))
+		}
+		return lines
+	}
+	if m.donate.uploadLine != "" {
+		style := stGreen
+		if m.donate.uploadFail {
+			style = stRed
+		}
+		lines := make([]string, 0, 2)
+		for _, line := range wrapText(m.donate.uploadLine, max(8, w-8)) {
+			lines = append(lines, centerLine(style.Render(line), w))
+		}
+		return lines
+	}
+	return nil
+}
+
+func tailPath(path string, w int) string {
+	if lipgloss.Width(path) <= w {
+		return path
+	}
+	if w < 2 {
+		return "…"
+	}
+	runes := []rune(path)
+	for len(runes) > 0 && lipgloss.Width(string(runes))+1 > w {
+		runes = runes[1:]
+	}
+	return "…" + string(runes)
+}
+
+func donateCoreSummary(summary dump.Summary, elapsed time.Duration) string {
+	return fmt.Sprintf("%d apps · %d depots · %d manifests · %s",
+		summary.Apps, summary.Depots, summary.Manifests, elapsed.Round(time.Second))
 }
 
 func (m Model) donateVisibleLog(h int) []string {
