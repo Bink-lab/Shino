@@ -30,27 +30,24 @@ func DownloadAll(ctx context.Context, cfg *lua.Config, manifestsDir, outputDir s
 		logf("cdn servers lookup failed: %v", err)
 		return warnings, err
 	}
-	var hosts []string
-	for _, s := range servers {
-		if s.Host == "" || s.SteamChinaOnly {
-			continue
-		}
-		hosts = append(hosts, s.Host)
-		if len(hosts) >= 6 {
-			break
-		}
-	}
-	if len(hosts) == 0 {
+	endpoints, proxy := BuildEndpoints(servers, cfg.AppID)
+	if len(endpoints) == 0 {
 		logf("no cdn hosts available")
 		return warnings, fmt.Errorf("no cdn hosts")
 	}
-	logf("using %d cdn hosts", len(hosts))
+	logf("using %d cdn hosts", len(endpoints))
+	for _, ep := range endpoints {
+		logf("cdn %s (%s)", ep.Display(), ep.Type)
+	}
+	if proxy != nil {
+		logf("cdn proxy %s", proxy.Display())
+	}
 	for i, dep := range cfg.Depots {
 		if err := ctx.Err(); err != nil {
 			return warnings, err
 		}
 		logf("depot %d: starting (%d/%d)", dep.ID, i+1, len(cfg.Depots))
-		w, err := DownloadDepot(ctx, sess, hosts, Options{
+		w, err := DownloadDepot(ctx, sess, endpoints, proxy, Options{
 			AppID:        cfg.AppID,
 			Depot:        dep,
 			ManifestsDir: manifestsDir,

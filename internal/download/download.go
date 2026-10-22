@@ -3,19 +3,43 @@ package download
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"gitee.com/zhReimu/steam-go/application/content/cdn"
 	"gitee.com/zhReimu/steam-go/application/content/depot"
+	cryptoutil "gitee.com/zhReimu/steam-go/infrastructure/crypto"
 	"gitee.com/zhReimu/steam-go/infrastructure/protocol/protobuf"
 
 	"github.com/Bink-lab/Shino/internal/lua"
 	"github.com/Bink-lab/Shino/internal/steam"
 )
+
+const tokenRetryInterval = 30 * time.Second
+
+var cdnHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout: 5 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   5 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+		MaxIdleConnsPerHost:   16,
+	},
+	Timeout: 30 * time.Second,
+}
 
 type Options struct {
 	AppID        uint32
@@ -33,8 +57,8 @@ func (o Options) logf(format string, args ...any) {
 	}
 }
 
-func DownloadDepot(ctx context.Context, sess *steam.Session, hosts []string, opt Options) (warnings []string, retErr error) {
-	if len(hosts) == 0 {
+func DownloadDepot(ctx context.Context, sess *steam.Session, endpoints []Endpoint, proxy *Endpoint, opt Options) (warnings []string, retErr error) {
+	if len(endpoints) == 0 {
 		return warnings, fmt.Errorf("no cdn hosts")
 	}
 	if opt.Depot.Key == "" {
@@ -58,19 +82,29 @@ func DownloadDepot(ctx context.Context, sess *steam.Session, hosts []string, opt
 	opt.logf("depot %d: manifest ready", opt.Depot.ID)
 	tokens := map[string]string{}
 	var tokenFailed []string
+	failedAt := map[string]time.Time{}
 	var tokMu sync.Mutex
-	tokenFor := func(host string) string {
+	tokenFor := func(ep Endpoint) string {
+		key := ep.TokenHost
 		tokMu.Lock()
 		defer tokMu.Unlock()
-		if t, ok := tokens[host]; ok {
+		if t, ok := tokens[key]; ok {
 			return t
 		}
-		t, err := sess.CDNToken(ctx, opt.AppID, opt.Depot.ID, host)
-		if err != nil {
-			tokenFailed = append(tokenFailed, host)
-			t = ""
+		if since, ok := failedAt[key]; ok && time.Since(since) < tokenRetryInterval {
+			return ""
 		}
-		tokens[host] = t
+		tctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		t, err := sess.CDNToken(tctx, opt.AppID, opt.Depot.ID, key)
+		cancel()
+		if err != nil {
+			failedAt[key] = time.Now()
+			if !slices.Contains(tokenFailed, key) {
+				tokenFailed = append(tokenFailed, key)
+			}
+			return ""
+		}
+		tokens[key] = t
 		return t
 	}
 	defer func() {
@@ -175,7 +209,7 @@ func DownloadDepot(ctx context.Context, sess *steam.Session, hosts []string, opt
 				case <-ctx.Done():
 					return
 				}
-				data, err := downloadChunk(ctx, key, hosts, tokenFor, opt.Depot.ID, ch)
+				data, err := downloadChunk(ctx, key, endpoints, proxy, tokenFor, opt.Depot.ID, ch)
 				if err != nil {
 					fail(err)
 					return
@@ -240,27 +274,121 @@ func FormatBytes(n uint64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGT"[exp])
 }
 
-func firstHost[T any](ctx context.Context, hosts []string, fn func(string) (T, error)) (T, error) {
-	var zero T
-	var err error
-	for _, host := range hosts {
-		if ctx.Err() != nil {
-			return zero, ctx.Err()
-		}
-		var v T
-		if v, err = fn(host); err == nil {
-			return v, nil
-		}
-	}
-	return zero, err
+type httpStatusError struct {
+	code int
+	msg string
 }
 
-func downloadChunk(ctx context.Context, key []byte, hosts []string, tokenFor func(string) string, depotID uint32, ch *protobuf.ContentManifestPayload_FileMapping_ChunkData) ([]byte, error) {
-	client := cdn.NewCDNClient(key)
-	client.ChunkRetry = 2
-	return firstHost(ctx, hosts, func(host string) ([]byte, error) {
-		return client.DownloadChunkContext(ctx, host, depotID, tokenFor(host), ch)
-	})
+func (e *httpStatusError) Error() string { return e.msg }
+
+var chunkRR uint64
+
+func downloadChunk(ctx context.Context, key []byte, endpoints []Endpoint, proxy *Endpoint, tokenFor func(Endpoint) string, depotID uint32, ch *protobuf.ContentManifestPayload_FileMapping_ChunkData) ([]byte, error) {
+	if ch == nil {
+		return nil, fmt.Errorf("depot %d: nil chunk", depotID)
+	}
+	n := len(endpoints)
+	if n == 0 {
+		return nil, fmt.Errorf("depot %d: no cdn hosts", depotID)
+	}
+	shaHex := fmt.Sprintf("%x", ch.GetSha())
+	start := int(atomic.AddUint64(&chunkRR, 1) % uint64(n))
+	const maxAttempts = 8
+	var lastErr error
+	fatalHosts := 0
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		ep := endpoints[(start+attempt)%n]
+		token := tokenFor(ep)
+		target := buildChunkURL(ep, proxy, depotID, shaHex, token)
+		attemptCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		data, err := fetchChunk(attemptCtx, target, key, ch)
+		cancel()
+		if err == nil {
+			return data, nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		lastErr = fmt.Errorf("%s: %w", ep.Display(), err)
+		if isFatalStatus(err) {
+			fatalHosts++
+			if fatalHosts >= n {
+				break
+			}
+			continue
+		}
+		if attempt < maxAttempts-1 {
+			backoff := 250 * time.Millisecond << uint(attempt)
+			if backoff > 4*time.Second {
+				backoff = 4 * time.Second
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff):
+			}
+		}
+	}
+	return nil, fmt.Errorf("depot %d chunk %s: %w", depotID, shaHex[:min(12, len(shaHex))], lastErr)
+}
+
+func isFatalStatus(err error) bool {
+	var statusErr *httpStatusError
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+	if statusErr.code == 408 || statusErr.code == 429 {
+		return false
+	}
+	return statusErr.code >= 400 && statusErr.code < 500
+}
+
+func fetchChunk(ctx context.Context, target string, key []byte, ch *protobuf.ContentManifestPayload_FileMapping_ChunkData) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := cdnHTTPClient.Do(req)
+	if err != nil {
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			return nil, &url.Error{Op: urlErr.Op, URL: redactURL(urlErr.URL), Err: urlErr.Err}
+		}
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, &httpStatusError{code: resp.StatusCode, msg: fmt.Sprintf("cdn %s", resp.Status)}
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, cdn.MaxChunkSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > cdn.MaxChunkSize {
+		return nil, fmt.Errorf("chunk exceeds %d bytes", cdn.MaxChunkSize)
+	}
+	decrypted, err := cryptoutil.SymmetricDecryptCBCWithKey(key, body)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt: %w", err)
+	}
+	decompressed, err := cdn.DecompressChunk(decrypted, int(ch.GetCbOriginal()))
+	if err != nil {
+		return nil, fmt.Errorf("decompress: %w", err)
+	}
+	if err := cdn.VerifyChecksum(decompressed, ch.GetCrc()); err != nil {
+		return nil, err
+	}
+	return decompressed, nil
+}
+
+func redactURL(target string) string {
+	if i := strings.IndexByte(target, '?'); i >= 0 {
+		return target[:i+1] + "redacted"
+	}
+	return target
 }
 
 func decryptIfNeeded(m *depot.DepotManifest, key []byte) error {

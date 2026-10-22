@@ -27,6 +27,7 @@ import (
 	"gitee.com/zhReimu/steam-go/application/content/depot"
 
 	"github.com/Bink-lab/Shino/internal/appinfo"
+	"github.com/Bink-lab/Shino/internal/download"
 )
 
 type Client struct {
@@ -132,35 +133,10 @@ func paceSleep(ctx context.Context, d time.Duration) bool {
 }
 
 func buildEndpoints(servers []steamcontent.Server, appID uint32) []cdnServer {
-	var out []cdnServer
-	for _, s := range servers {
-		if s.Host == "" || s.SteamChinaOnly {
-			continue
-		}
-		if len(s.AllowedAppIDs) > 0 {
-			allowed := false
-			for _, id := range s.AllowedAppIDs {
-				if id == appID {
-					allowed = true
-					break
-				}
-			}
-			if !allowed {
-				continue
-			}
-		}
-		host := s.VHost
-		if host == "" {
-			host = s.Host
-		}
-		scheme := "http"
-		if s.Port == 443 {
-			scheme = "https"
-		}
-		out = append(out, cdnServer{url: scheme + "://" + host, host: s.Host})
-		if len(out) >= 6 {
-			break
-		}
+	endpoints, _ := download.BuildEndpoints(servers, appID)
+	out := make([]cdnServer, 0, len(endpoints))
+	for _, ep := range endpoints {
+		out = append(out, cdnServer{url: ep.Display(), host: ep.TokenHost})
 	}
 	return out
 }

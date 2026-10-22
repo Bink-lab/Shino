@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	_ "golang.org/x/image/webp"
 )
 
 func thumbnailLines(data []byte, columns, rows int) []string {
@@ -25,7 +26,7 @@ func thumbnailLines(data []byte, columns, rows int) []string {
 	if err != nil {
 		return placeholderThumbnail(columns, rows)
 	}
-	bounds := img.Bounds()
+	bounds := coverBounds(img.Bounds(), columns, rows*2)
 	if bounds.Dx() <= 0 || bounds.Dy() <= 0 {
 		return placeholderThumbnail(columns, rows)
 	}
@@ -44,6 +45,28 @@ func thumbnailLines(data []byte, columns, rows int) []string {
 		lines[row] = b.String()
 	}
 	return lines
+}
+
+func coverBounds(bounds image.Rectangle, cols, rows int) image.Rectangle {
+	if cols <= 0 || rows <= 0 || bounds.Dx() <= 0 || bounds.Dy() <= 0 {
+		return bounds
+	}
+	target := float64(cols) / float64(rows)
+	source := float64(bounds.Dx()) / float64(bounds.Dy())
+	if source > target {
+		w := int(float64(bounds.Dy()) * target)
+		if w < 1 {
+			w = 1
+		}
+		x0 := bounds.Min.X + (bounds.Dx()-w)/2
+		return image.Rect(x0, bounds.Min.Y, x0+w, bounds.Max.Y)
+	}
+	h := int(float64(bounds.Dx()) / target)
+	if h < 1 {
+		h = 1
+	}
+	y0 := bounds.Min.Y + (bounds.Dy()-h)/2
+	return image.Rect(bounds.Min.X, y0, bounds.Max.X, y0+h)
 }
 
 func placeholderThumbnail(columns, rows int) []string {

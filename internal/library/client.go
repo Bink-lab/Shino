@@ -162,7 +162,8 @@ func (c *Client) FetchImage(ctx context.Context, appID uint32) ([]byte, error) {
 	var payload struct {
 		Success bool `json:"success"`
 		Data    struct {
-			HeaderImage string `json:"header_image"`
+			HeaderImage     string `json:"header_image"`
+			BackgroundImage string `json:"background_image"`
 		} `json:"data"`
 	}
 	err = decodeJSONLimited(resp.Body, maxAppDetailsBytes, &payload)
@@ -170,10 +171,14 @@ func (c *Client) FetchImage(ctx context.Context, appID uint32) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("app details decode failed: %w", err)
 	}
-	if payload.Data.HeaderImage == "" {
-		return nil, fmt.Errorf("app %d has no header image", appID)
+	imageURL := payload.Data.BackgroundImage
+	if imageURL == "" {
+		imageURL = payload.Data.HeaderImage
 	}
-	return fetchBytes(ctx, c.httpClient, payload.Data.HeaderImage, maxImageBytes)
+	if imageURL == "" {
+		return nil, fmt.Errorf("app %d has no image", appID)
+	}
+	return fetchBytes(ctx, c.httpClient, imageURL, maxImageBytes)
 }
 
 func (c *Client) DownloadRyuu(ctx context.Context, appID uint32, authCode string, dst io.Writer) error {
