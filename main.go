@@ -162,10 +162,7 @@ func uploadSummary(ctx context.Context, summary dump.Summary) error {
 	if err != nil || apiKey == "" {
 		return fmt.Errorf("no shinoweb api key saved, create one on the site and add it with k on the donation screen")
 	}
-	baseURL := os.Getenv("SHINOWEB_URL")
-	if baseURL == "" {
-		baseURL = library.DefaultShinoWebURL
-	}
+	baseURL := library.DefaultShinoWebURL
 	fmt.Println("uploading donation")
 	id, err := dump.UploadDonation(ctx, dump.UploadConfig{
 		BaseURL: baseURL, APIKey: apiKey, FilePath: summary.Archive,

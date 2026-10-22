@@ -184,7 +184,7 @@ func New() Model {
 		status:       "idle",
 		version:      dump.BuildTag(),
 		lib: libraryPanel{
-			client:    library.NewClient(library.ClientConfig{ShinoWebURL: os.Getenv("SHINOWEB_URL")}),
+			client:    library.NewClient(library.ClientConfig{}),
 			search:    newLibrarySearchInput(),
 			keyInput:  newLibraryKeyInput(),
 			images:    map[uint32][]string{},

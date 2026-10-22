@@ -3,7 +3,6 @@ package tui
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -291,10 +290,7 @@ func (m Model) launchDonateUpload() (tea.Model, tea.Cmd) {
 	if apiKey == "" {
 		return m.openDonateKey(true)
 	}
-	baseURL := os.Getenv("SHINOWEB_URL")
-	if baseURL == "" {
-		baseURL = library.DefaultShinoWebURL
-	}
+	baseURL := library.DefaultShinoWebURL
 	if m.donate.cancel != nil {
 		m.donate.cancel()
 		m.donate.cancel = nil

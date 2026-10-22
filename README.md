@@ -48,6 +48,10 @@ pinapp(123456)
 
 Depots without a key or manifest fail during download.
 
+## Library
+
+The `shino` library provider downloads cached bundles from `https://shino.my`.
+
 ## Contributing
 
 Don't send AI-generated PRs. I'll close them without reading them. If you can't explain every line of your own diff, don't open it.

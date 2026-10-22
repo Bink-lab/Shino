@@ -20,7 +20,7 @@ const (
 	DefaultAppDetailsURL = "https://api.bonker.dev/api/appdetails"
 	DefaultRyuuURL       = "https://generator.ryuu.lol/secure_download"
 	DefaultHubcapURL     = "https://hubcapmanifest.com/api/v1/manifest"
-	DefaultShinoWebURL   = "http://localhost:3000"
+	DefaultShinoWebURL   = "https://shino.my"
 	DefaultStoreURL      = "https://store.steampowered.com/api/appdetails"
 
 	storeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
@@ -45,30 +45,26 @@ func (a App) SearchName() string {
 }
 
 type ClientConfig struct {
-	HTTPClient    *http.Client
 	AppListURL    string
 	AppDetailsURL string
 	RyuuURL       string
 	HubcapURL     string
-	ShinoWebURL   string
 	StoreURL      string
 }
 
 type Client struct {
-	httpClient    *http.Client
-	appListURL    string
-	appDetailsURL string
-	ryuuURL       string
-	hubcapURL     string
-	shinoWebURL   string
-	storeURL      string
+	httpClient     *http.Client
+	downloadClient *http.Client
+	appListURL     string
+	appDetailsURL  string
+	ryuuURL        string
+	hubcapURL      string
+	storeURL       string
 }
 
 func NewClient(config ClientConfig) *Client {
-	httpClient := config.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
-	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = 2 * time.Minute
 	appListURL := config.AppListURL
 	if appListURL == "" {
 		appListURL = DefaultAppListURL
@@ -85,22 +81,18 @@ func NewClient(config ClientConfig) *Client {
 	if hubcapURL == "" {
 		hubcapURL = DefaultHubcapURL
 	}
-	shinoWebURL := config.ShinoWebURL
-	if shinoWebURL == "" {
-		shinoWebURL = DefaultShinoWebURL
-	}
 	storeURL := config.StoreURL
 	if storeURL == "" {
 		storeURL = DefaultStoreURL
 	}
 	return &Client{
-		httpClient:    httpClient,
-		appListURL:    appListURL,
-		appDetailsURL: appDetailsURL,
-		ryuuURL:       ryuuURL,
-		hubcapURL:     hubcapURL,
-		shinoWebURL:   shinoWebURL,
-		storeURL:      storeURL,
+		httpClient:     &http.Client{Timeout: 30 * time.Second},
+		downloadClient: &http.Client{Transport: transport},
+		appListURL:     appListURL,
+		appDetailsURL:  appDetailsURL,
+		ryuuURL:        ryuuURL,
+		hubcapURL:      hubcapURL,
+		storeURL:       storeURL,
 	}
 }
 
@@ -111,7 +103,7 @@ func (c *Client) FetchApps(ctx context.Context) ([]App, error) {
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, errors.New("app list request failed")
+		return nil, fmt.Errorf("app list request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -153,7 +145,7 @@ func (c *Client) FetchImage(ctx context.Context, appID uint32) ([]byte, error) {
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, errors.New("app details request failed")
+		return nil, fmt.Errorf("app details request failed: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		resp.Body.Close()
@@ -171,9 +163,9 @@ func (c *Client) FetchImage(ctx context.Context, appID uint32) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("app details decode failed: %w", err)
 	}
-	imageURL := payload.Data.BackgroundImage
+	imageURL := payload.Data.HeaderImage
 	if imageURL == "" {
-		imageURL = payload.Data.HeaderImage
+		imageURL = payload.Data.BackgroundImage
 	}
 	if imageURL == "" {
 		return nil, fmt.Errorf("app %d has no image", appID)
@@ -214,15 +206,15 @@ func (c *Client) DownloadHubcap(ctx context.Context, appID uint32, apiKey string
 }
 
 func (c *Client) DownloadShinoWeb(ctx context.Context, appID uint32, apiKey string, dst io.Writer) error {
-	endpoint := strings.TrimRight(c.shinoWebURL, "/") + "/api/v1/games/" + strconv.FormatUint(uint64(appID), 10) + "/download"
+	endpoint := strings.TrimRight(DefaultShinoWebURL, "/") + "/api/v1/games/" + strconv.FormatUint(uint64(appID), 10) + "/download"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return errors.New("invalid shino url")
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.downloadClient.Do(req)
 	if err != nil {
-		return errors.New("shino request failed")
+		return fmt.Errorf("shino request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -245,9 +237,9 @@ func (c *Client) DownloadShinoWeb(ctx context.Context, appID uint32, apiKey stri
 }
 
 func (c *Client) streamArchive(req *http.Request, label string, dst io.Writer) error {
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.downloadClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("%s request failed", label)
+		return fmt.Errorf("%s request failed: %w", label, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -255,7 +247,7 @@ func (c *Client) streamArchive(req *http.Request, label string, dst io.Writer) e
 	}
 	written, err := io.Copy(dst, io.LimitReader(resp.Body, maxBundleBytes+1))
 	if err != nil {
-		return fmt.Errorf("%s download interrupted", label)
+		return fmt.Errorf("%s download interrupted: %w", label, err)
 	}
 	if written > maxBundleBytes {
 		return fmt.Errorf("%s archive exceeds %d bytes", label, int64(maxBundleBytes))
@@ -289,7 +281,7 @@ func fetchBytes(ctx context.Context, httpClient *http.Client, rawURL string, lim
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, errors.New("image request failed")
+		return nil, fmt.Errorf("image request failed: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
