@@ -1,6 +1,6 @@
 # Shino
 
-Steam depot downloader with a terminal UI. Point it at a SteamTools/LMS-style `.lua` config and a folder of `.manifest` files (or a single zip containing both), and it pulls the depots from Steam's CDN into an output folder.
+Steam depot downloader with a terminal UI. Point it at a `.lua` config and a folder of `.manifest` files (or a single zip containing both), and it pulls the depots from Steam's CDN into an output folder.
 
 ![Shino TUI](docs/demo.gif)
 
